@@ -2,11 +2,12 @@
 # Oldalak: Lámpa | Zene (indítás/leállítás + 4 stílus) | Listák (MA kedvenc lejátszási listák)
 #          | Időzítő (5/10/15 perc, a végén csipog)
 #          | Játék (párkereső, Simon mondja, amőba 1/2 fő, vakondos – hanggal)
+#          | Zsebpénz (csillag ikon: a gyerekek gyűjtése csillagokkal, mint a HA-s kártyán)
 # Gyerekzár (HA-kapcsoló): bekapcsolva csak a Lámpa és a Spot oldal érhető el.
 # Éjszakai mód (HA-kapcsoló): sötét kijelző; érintésre felkapcsol, 10 mp után újra elsötétül.
 # Webes felület: http://<panel IP-címe>/
 # Követelmény: ESPHome 2025.10+ (HA-akció válaszának fogadása a listákhoz).
-# A boti_games.h és a spot_picker.h fájlnak ezzel a YAML-lel egy mappában kell lennie.
+# Az összes boti_szoba_panel_* fájlnak (.h és .png) ezzel a YAML-lel egy mappában kell lennie.
 # A HA-ban az ESPHome integrációnál engedélyezd az eszköznek a
 # „Home Assistant akciók végrehajtása” opciót, különben a zene nem megy.
 
@@ -28,14 +29,24 @@ substitutions:
   style3_media: spotify--SAqMwi7M://playlist/35e5754OovKtVL787BQeHl
   style4_label: Buli         # Bulis gyerekdalok
   style4_media: spotify--SAqMwi7M://playlist/3z5RGCaAali30mrrraDwpY
+  # Zsebpénz oldal: gyerekenként név, a cél neve, a gyűjtött összeg és a cél ára (HA-entitások)
+  kid1_name: Botond
+  kid1_goal: Lego
+  kid1_saved: sensor.penzgyujtes_botond_zsebpenz
+  kid1_target: input_number.botond_valasztott_targy_ara
+  kid2_name: Marcell
+  kid2_goal: Lego
+  kid2_saved: sensor.penzgyujtes_marcell_zsebpenz
+  kid2_target: input_number.marcell_valasztott_targy_ara
 
 esphome:
   name: ${name}
   friendly_name: ${friendly_name}
   min_version: 2025.10.0
   includes:
-    - boti_games.h
-    - spot_picker.h
+    - boti_szoba_panel_games.h
+    - boti_szoba_panel_spot.h
+    - boti_szoba_panel_savings.h
   on_boot:
     priority: -100
     then:
@@ -274,6 +285,28 @@ font:
     id: font_l
     size: 34
     glyphsets: [GF_Latin_Core]
+  # Ikonok a Zsebpénz oldalhoz (Material Design Icons): csillag
+  - file: "https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/fonts/materialdesignicons-webfont.ttf"
+    id: icon_nav
+    size: 34
+    glyphs: ["\U000F04CE"]
+  - file: "https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/fonts/materialdesignicons-webfont.ttf"
+    id: icon_star
+    size: 44
+    glyphs: ["\U000F04CE"]
+
+# A gyerekek fotója a Zsebpénz oldalon (átlátszó hátterű PNG a YAML mellett)
+image:
+  - file: boti_szoba_panel_boti.png
+    id: img_kid1
+    type: RGB565
+    transparency: alpha_channel
+    resize: 86x86
+  - file: boti_szoba_panel_marci.png
+    id: img_kid2
+    type: RGB565
+    transparency: alpha_channel
+    resize: 86x86
 
 # ---------------------------------------------------------------- HA-adatok
 text_sensor:
@@ -331,6 +364,27 @@ sensor:
       - lvgl.slider.update:
           id: spot_bri_slider
           value: !lambda "return std::isnan(x) ? 1.0f : x / 2.55f;"
+  # Zsebpénz: gyűjtött összeg és a cél ára gyerekenként
+  - platform: homeassistant
+    id: kid1_saved
+    entity_id: ${kid1_saved}
+    on_value:
+      - lambda: "savings::set_saved(0, x);"
+  - platform: homeassistant
+    id: kid1_target
+    entity_id: ${kid1_target}
+    on_value:
+      - lambda: "savings::set_target(0, x);"
+  - platform: homeassistant
+    id: kid2_saved
+    entity_id: ${kid2_saved}
+    on_value:
+      - lambda: "savings::set_saved(1, x);"
+  - platform: homeassistant
+    id: kid2_target
+    entity_id: ${kid2_target}
+    on_value:
+      - lambda: "savings::set_target(1, x);"
 
 binary_sensor:
   - platform: homeassistant
@@ -412,11 +466,11 @@ script:
           condition:
             lambda: "return id(locked);"
           then:
-            - lvgl.widget.hide: [nav_music, nav_lists, nav_timer, nav_games]
+            - lvgl.widget.hide: [nav_music, nav_lists, nav_timer, nav_games, nav_savings]
             - lvgl.widget.show: lock_label
             - lvgl.page.show: page_light
           else:
-            - lvgl.widget.show: [nav_music, nav_lists, nav_timer, nav_games]
+            - lvgl.widget.show: [nav_music, nav_lists, nav_timer, nav_games, nav_savings]
             - lvgl.widget.hide: lock_label
 
   # Időzítő
@@ -674,7 +728,7 @@ lvgl:
       border_width: 0
     - id: nav_btn
       height: 64
-      width: 96
+      width: 84
       radius: 0
       bg_color: 0x1B2336
   top_layer:
@@ -702,7 +756,7 @@ lvgl:
             - button:
                 id: nav_music
                 styles: nav_btn
-                x: 96
+                x: 84
                 on_click:
                   - lvgl.page.show: page_music
                 widgets:
@@ -713,7 +767,7 @@ lvgl:
             - button:
                 id: nav_lists
                 styles: nav_btn
-                x: 192
+                x: 168
                 on_click:
                   - lvgl.page.show: page_lists
                   - script.execute: load_lists
@@ -725,7 +779,7 @@ lvgl:
             - button:
                 id: nav_timer
                 styles: nav_btn
-                x: 288
+                x: 252
                 on_click:
                   - lvgl.page.show: page_timer
                 widgets:
@@ -737,7 +791,7 @@ lvgl:
             - button:
                 id: nav_games
                 styles: nav_btn
-                x: 384
+                x: 336
                 on_click:
                   - lvgl.page.show: page_games
                 widgets:
@@ -745,6 +799,22 @@ lvgl:
                       align: CENTER
                       text: "Játék"
                       text_font: font_s
+            - button:
+                id: nav_savings
+                styles: nav_btn
+                x: 420
+                width: 60
+                on_click:
+                  - lambda: |-
+                      savings::setup(0, id(sav1_stars), id(sav1_pct), id(sav1_saved), id(sav1_target));
+                      savings::setup(1, id(sav2_stars), id(sav2_pct), id(sav2_saved), id(sav2_target));
+                  - lvgl.page.show: page_savings
+                widgets:
+                  - label:
+                      align: CENTER
+                      text: "\U000F04CE"
+                      text_font: icon_nav
+                      text_color: 0xF5B700
             # Gyerekzár alatt a többi gomb helyén ez látszik
             - label:
                 id: lock_label
@@ -835,7 +905,7 @@ lvgl:
                     entity_id: ${spot_light}
             widgets:
               - label: { align: CENTER, text: "", text_font: montserrat_28 }
-        # Színkör: a spot_picker.h rajzolja meg az első megnyitáskor
+        # Színkör: a boti_szoba_panel_spot.h rajzolja meg az első megnyitáskor
         - canvas:
             id: spot_wheel
             x: 120
@@ -1183,7 +1253,7 @@ lvgl:
               - label: { align: CENTER, text: "Leállítás", text_font: font_s }
 
     # ------------------------------------------------ 4. Játékválasztó
-    # A játékokat az első megnyitáskor hozza létre a boti_games.h
+    # A játékokat az első megnyitáskor hozza létre a boti_szoba_panel_games.h
     - id: page_games
       styles: page_style
       scrollable: false
@@ -1420,3 +1490,152 @@ lvgl:
             bg_opa: TRANSP
             border_width: 0
             scrollable: false
+
+    # ------------------------------------------------ 5. Zsebpénz (csillag ikon a sávon)
+    # Mint a HA-s kids-savings-card: 10 csillag, mindegyik a cél árának 10%-a
+    - id: page_savings
+      styles: page_style
+      scrollable: false
+      widgets:
+        - obj:
+            x: 12
+            y: 10
+            width: 456
+            height: 196
+            pad_all: 0
+            radius: 18
+            border_width: 0
+            bg_color: 0x1B2336
+            scrollable: false
+            widgets:
+              - label: { x: 18, y: 10, text: "${kid1_name} · ${kid1_goal}" }
+              # Százalék-jelvény
+              - obj:
+                  x: 360
+                  y: 10
+                  width: 80
+                  height: 36
+                  pad_all: 0
+                  radius: 18
+                  border_width: 0
+                  bg_color: 0x2A3550
+                  scrollable: false
+                  widgets:
+                    - label: { id: sav1_pct, align: CENTER, text: "", text_font: font_s }
+              # 2×5 csillag: a boti_szoba_panel_savings.h tölti fel
+              - obj:
+                  id: sav1_stars
+                  x: 18
+                  y: 50
+                  width: 260
+                  height: 98
+                  pad_all: 0
+                  border_width: 0
+                  bg_opa: TRANSP
+                  scrollable: false
+                  text_font: icon_star
+              # A gyerek fotója körben
+              - obj:
+                  x: 316
+                  y: 52
+                  width: 96
+                  height: 96
+                  pad_all: 0
+                  radius: 48
+                  border_width: 3
+                  border_color: 0x5A6380
+                  bg_color: 0x121826
+                  scrollable: false
+                  widgets:
+                    - image: { align: CENTER, src: img_kid1 }
+              # „100 Ft / 7 490 Ft”
+              - obj:
+                  x: 0
+                  y: 150
+                  width: 456
+                  height: 42
+                  pad_all: 0
+                  border_width: 0
+                  bg_opa: TRANSP
+                  scrollable: false
+                  layout:
+                    type: flex
+                    flex_flow: ROW
+                    flex_align_main: CENTER
+                    flex_align_cross: END
+                    flex_align_track: CENTER
+                    pad_column: 10
+                  widgets:
+                    - label: { id: sav1_saved, text: "", text_font: font_l }
+                    - label: { id: sav1_target, text: "", text_font: font_s, text_color: 0x8890A6, pad_bottom: 5 }
+        - obj:
+            x: 12
+            y: 212
+            width: 456
+            height: 196
+            pad_all: 0
+            radius: 18
+            border_width: 0
+            bg_color: 0x1B2336
+            scrollable: false
+            widgets:
+              - label: { x: 18, y: 10, text: "${kid2_name} · ${kid2_goal}" }
+              # Százalék-jelvény
+              - obj:
+                  x: 360
+                  y: 10
+                  width: 80
+                  height: 36
+                  pad_all: 0
+                  radius: 18
+                  border_width: 0
+                  bg_color: 0x2A3550
+                  scrollable: false
+                  widgets:
+                    - label: { id: sav2_pct, align: CENTER, text: "", text_font: font_s }
+              # 2×5 csillag: a boti_szoba_panel_savings.h tölti fel
+              - obj:
+                  id: sav2_stars
+                  x: 18
+                  y: 50
+                  width: 260
+                  height: 98
+                  pad_all: 0
+                  border_width: 0
+                  bg_opa: TRANSP
+                  scrollable: false
+                  text_font: icon_star
+              # A gyerek fotója körben
+              - obj:
+                  x: 316
+                  y: 52
+                  width: 96
+                  height: 96
+                  pad_all: 0
+                  radius: 48
+                  border_width: 3
+                  border_color: 0x5A6380
+                  bg_color: 0x121826
+                  scrollable: false
+                  widgets:
+                    - image: { align: CENTER, src: img_kid2 }
+              # „100 Ft / 7 490 Ft”
+              - obj:
+                  x: 0
+                  y: 150
+                  width: 456
+                  height: 42
+                  pad_all: 0
+                  border_width: 0
+                  bg_opa: TRANSP
+                  scrollable: false
+                  layout:
+                    type: flex
+                    flex_flow: ROW
+                    flex_align_main: CENTER
+                    flex_align_cross: END
+                    flex_align_track: CENTER
+                    pad_column: 10
+                  widgets:
+                    - label: { id: sav2_saved, text: "", text_font: font_l }
+                    - label: { id: sav2_target, text: "", text_font: font_s, text_color: 0x8890A6, pad_bottom: 5 }

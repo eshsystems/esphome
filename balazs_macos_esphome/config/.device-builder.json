@@ -5,6 +5,68 @@
   },
   "_firmware_jobs": [
     {
+      "job_id": "20f3cce720d3",
+      "configuration": "boti_szoba_panel.yaml",
+      "job_type": "upload",
+      "status": "completed",
+      "created_at": "2026-10-25T21:48:21.889683+00:00",
+      "started_at": "2026-10-25T21:51:46.909988+00:00",
+      "completed_at": "2026-10-25T21:51:58.417429+00:00",
+      "compile_started_at": null,
+      "compile_ended_at": null,
+      "exit_code": 0,
+      "error": null,
+      "port": "OTA",
+      "flash_bootloader": false,
+      "is_deferred_install": false,
+      "new_name": "",
+      "depends_on": "efc99b051bf5",
+      "dependency_released": true,
+      "progress": 100,
+      "remote_peer": "",
+      "remote_job_id": "",
+      "remote_peer_label": "",
+      "device_name": "",
+      "device_friendly_name": "",
+      "source": "local",
+      "source_pin_sha256": "",
+      "source_label": "",
+      "source_esphome_version": "",
+      "target_esphome_version": "",
+      "failure_reason": ""
+    },
+    {
+      "job_id": "efc99b051bf5",
+      "configuration": "boti_szoba_panel.yaml",
+      "job_type": "compile",
+      "status": "completed",
+      "created_at": "2026-10-25T21:48:21.889628+00:00",
+      "started_at": "2026-10-25T21:48:21.891029+00:00",
+      "completed_at": "2026-10-25T21:51:46.908057+00:00",
+      "compile_started_at": "2026-10-25T21:48:47.057809+00:00",
+      "compile_ended_at": "2026-10-25T21:51:46.419861+00:00",
+      "exit_code": 0,
+      "error": null,
+      "port": "",
+      "flash_bootloader": false,
+      "is_deferred_install": false,
+      "new_name": "",
+      "depends_on": "",
+      "dependency_released": false,
+      "progress": 99,
+      "remote_peer": "",
+      "remote_job_id": "",
+      "remote_peer_label": "",
+      "device_name": "",
+      "device_friendly_name": "",
+      "source": "local",
+      "source_pin_sha256": "",
+      "source_label": "",
+      "source_esphome_version": "",
+      "target_esphome_version": "",
+      "failure_reason": ""
+    },
+    {
       "job_id": "a64405ee6ef6",
       "configuration": "boti-szoba-panel.yaml",
       "job_type": "upload",
@@ -623,6 +685,9 @@
     "mac_address": "20:F8:3B:09:D0:D3"
   },
   "boti-szoba-panel.yaml": {
+    "mac_address": "B8:1F:3F:AA:59:D0"
+  },
+  "boti_szoba_panel.yaml": {
     "mac_address": "B8:1F:3F:AA:59:D0"
   }
 }
