@@ -691,7 +691,7 @@ lvgl:
   touchscreens: tft_touch
   buffer_size: 25%
   on_idle:
-    # Éjszakai módban az utolsó érintés után 10 mp-cel elsötétül
+    # Éjszakai módban az utolsó érintés után 10 mp-cel elsötétül és a Lámpa oldalra áll
     - timeout: 10s
       then:
         - if:
@@ -699,7 +699,8 @@ lvgl:
               lambda: "return id(night);"
             then:
               - script.execute: screen_off
-    # Nappal 60 mp után halványra vált
+              - lvgl.page.show: page_light
+    # Nappal 60 mp után halványra vált és a Lámpa oldalra áll
     - timeout: 60s
       then:
         - if:
@@ -709,6 +710,7 @@ lvgl:
               - light.turn_on:
                   id: display_backlight
                   brightness: 15%
+              - lvgl.page.show: page_light
   theme:
     button:
       bg_color: 0x2A3550
