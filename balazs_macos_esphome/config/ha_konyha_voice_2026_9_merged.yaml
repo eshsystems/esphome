@@ -34,7 +34,7 @@ substitutions:
   easter_egg_tada_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/easter_egg_tada.mp3
   error_cloud_expired_sound_file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/error_cloud_expired.mp3
 
-  # Stealth listen (TCP WAV to go2rtc listener)
+  # Stealth listen (existing helper; intended listener: go2rtc)
   stealth_stream_host: "192.168.22.202"
   stealth_stream_port: "12346"
 
@@ -42,7 +42,7 @@ esphome:
   name: konyha_havoice
   friendly_name: Konyha HA voice
   name_add_mac_suffix: true
-  min_version: 2026.5.0
+  min_version: 2026.9.0
   includes:
     - stealth_udp_reviewed.h
   on_boot:
@@ -246,7 +246,16 @@ switch:
     entity_category: config
     optimistic: true
     restore_mode: RESTORE_DEFAULT_ON
-  # Stealth listen: streams mic audio to TCP WAV listener. Manual only; never restore ON at boot.
+  # Disable physical controls switch
+  - platform: template
+    id: disable_buttons
+    name: Disable physical controls
+    icon: "mdi:button-pointer"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    disabled_by_default: true
+  # Stealth listen: uses stealth_udp_reviewed.h. Manual only; never restore ON at boot.
   - platform: template
     id: stealth_listen_switch
     name: Stealth listen
@@ -315,9 +324,17 @@ binary_sensor:
       number: GPIO0
       inverted: true
     on_press:
-      - script.execute: control_leds
+      - if:
+          condition:
+            switch.is_off: disable_buttons
+          then:
+            - script.execute: control_leds
     on_release:
-      - script.execute: control_leds
+      - if:
+          condition:
+            switch.is_off: disable_buttons
+          then:
+            - script.execute: control_leds
       # If a factory reset is requested, factory reset on release
       - if:
           condition:
@@ -338,7 +355,7 @@ binary_sensor:
         then:
           - if:
               condition:
-                lambda: return !id(init_in_progress) && !id(color_changed) && !id(group_volume_changed);
+                lambda: return !id(init_in_progress) && !id(color_changed) && !id(group_volume_changed) && !id(disable_buttons).state;
               then:
                 - if:
                     condition:
@@ -384,8 +401,8 @@ binary_sensor:
                                                   condition:
                                                     switch.is_on: stealth_listen_switch
                                                   then:
-                                                    - script.execute: stealth_listen_stop
                                                     - switch.turn_off: stealth_listen_switch
+                                              - script.wait: stealth_listen_stop
                                               - voice_assistant.start:
       # Double Click
       #  . Exposed as an event entity. To be used in automations inside Home Assistant
@@ -397,7 +414,7 @@ binary_sensor:
         then:
           - if:
               condition:
-                lambda: return !id(init_in_progress) && !id(color_changed) && !id(group_volume_changed);
+                lambda: return !id(init_in_progress) && !id(color_changed) && !id(group_volume_changed) && !id(disable_buttons).state;
               then:
                 - script.execute:
                     id: play_sound
@@ -418,7 +435,7 @@ binary_sensor:
         then:
           - if:
               condition:
-                lambda: return !id(init_in_progress) && !id(color_changed) && !id(group_volume_changed);
+                lambda: return !id(init_in_progress) && !id(color_changed) && !id(group_volume_changed) && !id(disable_buttons).state;
               then:
                 - script.execute:
                     id: play_sound
@@ -434,7 +451,7 @@ binary_sensor:
         then:
           - if:
               condition:
-                lambda: return !id(init_in_progress) && !id(color_changed) && !id(group_volume_changed);
+                lambda: return !id(init_in_progress) && !id(color_changed) && !id(group_volume_changed) && !id(disable_buttons).state;
               then:
                 - script.execute:
                     id: play_sound
@@ -604,7 +621,12 @@ light:
   - platform: esp32_rmt_led_strip
     id: leds_internal
     pin: GPIO21
-    chipset: WS2812
+    bit0_high: 300ns
+    bit0_low: 975ns
+    bit1_high: 650ns
+    bit1_low: 650ns
+    reset_low: 300us
+    reset_high: 0us
     max_refresh_rate: 15ms
     num_leds: 12
     rgb_order: GRB
@@ -1017,7 +1039,9 @@ sensor:
       - lambda: id(dial_touched) = true;
       - if:
           condition:
-            binary_sensor.is_off: center_button
+            and:
+              - binary_sensor.is_off: center_button
+              - switch.is_off: disable_buttons
           then:
             - script.execute:
                 id: control_volume
@@ -1039,7 +1063,9 @@ sensor:
       - lambda: id(dial_touched) = true;
       - if:
           condition:
-            binary_sensor.is_off: center_button
+            and:
+              - binary_sensor.is_off: center_button
+              - switch.is_off: disable_buttons
           then:
             - script.execute:
                 id: control_volume
@@ -1076,6 +1102,8 @@ script:
   - id: stealth_listen_start
     mode: restart
     then:
+      # Finish any previous shutdown before opening a new stream.
+      - script.wait: stealth_listen_stop
       - if:
           condition:
             and:
@@ -1102,6 +1130,8 @@ script:
   - id: stealth_listen_stop
     mode: restart
     then:
+      # Cancel a start that may still be waiting in its 250 ms delays.
+      - script.stop: stealth_listen_start
       - lambda: id(stealth_listen_enabled) = false;
       - microphone.stop_capture:
           id: i2s_mics
@@ -1698,6 +1728,7 @@ media_source:
     buffer_size: 500000
   - platform: sendspin
     id: sendspin_media_source
+    codecs: [FLAC, PCM]  # Prefer FLAC for Sendspin
     fixed_delay: 480 microseconds  # The AIC3204 DAC used, as configured, on the VPE delays audio by 480 microseconds
 
 media_player:
@@ -1837,8 +1868,8 @@ micro_wake_word:
                                 condition:
                                   switch.is_on: stealth_listen_switch
                                 then:
-                                  - script.execute: stealth_listen_stop
                                   - switch.turn_off: stealth_listen_switch
+                            - script.wait: stealth_listen_stop
                             - voice_assistant.start:
                                 wake_word: !lambda return wake_word;
 

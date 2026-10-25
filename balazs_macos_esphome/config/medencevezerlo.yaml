@@ -51,16 +51,16 @@ spi:
 
 modbus:
   - uart_id: uart_modbus_client
-    id: modbus_client
+    id: modbus_bus
 
 modbus_controller:
   - id: modbus_client1
-    modbus_id: modbus_client
+    modbus_id: modbus_bus
     address: 1
     update_interval: 2s
 
   - id: modbus_client2
-    modbus_id: modbus_client
+    modbus_id: modbus_bus
     address: 2
     update_interval: 2s
 

@@ -1,9 +1,11 @@
-# Board: ESP32 DevKit V1 (Espressif)
-# Definition: definitions/boards/esp32-devkit-v1/manifest.yaml
 
 esphome:
-  name: kiskapu-homekey
-  friendly_name: kiskapu-homekey
+  name: homekey-reader
+  friendly_name: HomeKey Reader
+  on_boot:
+    - lock.template.publish:
+        id: homekey_lock
+        state: LOCKED
 
 esp32:
   board: esp32dev
@@ -16,9 +18,19 @@ logger:
 api:
   encryption:
     key: "lRmKMF7V3Wby1egg1NMh4OSeHG/Pjm+Rweil8Yx9pqo="
+  actions:
+    - action: set_homekit_setup_code
+      variables:
+        code: string
+      then:
+        - lambda: 'id(homekit_bridge).set_setup_code_override(code);'
+    - action: clear_homekit_setup_code
+      then:
+        - lambda: 'id(homekit_bridge).clear_setup_code_override();'
 
 ota:
   - platform: esphome
+
 
 wifi:
   ssid: !secret wifi_ssid_udvar
@@ -27,22 +39,19 @@ wifi:
     static_ip: 192.168.22.87
     gateway: 192.168.22.1
     subnet: 255.255.255.0
-
-  # Enable fallback hotspot (captive portal) in case wifi connection fails
   ap:
-    ssid: "kikapu_homekey"
-    password: "U5Gb9rMzNk4R"
+    ssid: "HomeKey Reader Fallback"
+    password: "12345678"
 
 captive_portal:
 
 web_server:
   port: 80
 
-# Apple HomeKit / HomeKey külső komponensek
 external_components:
   - source:
       type: git
-      url: https://github.com/rednblkx/HAP-ESPHome
+      url: https://github.com/mefisto22/esphome-homekey-multihome
       ref: main
     components:
       - homekit
@@ -50,20 +59,11 @@ external_components:
       - pn532
       - pn532_spi
 
-# PN532 SPI bus
-# Bekötés:
-# PN532 SCK  -> GPIO18
-# PN532 MISO -> GPIO19
-# PN532 MOSI -> GPIO23
-# PN532 SS   -> GPIO5
-# PN532 VCC  -> 3.3V
-# PN532 GND  -> GND
 spi:
   clk_pin: GPIO18
   miso_pin: GPIO19
   mosi_pin: GPIO23
 
-# Ebbe a Home Assistant szenzorba kerül az utoljára olvasott NFC UID / HomeKey esemény
 text_sensor:
   - platform: template
     name: "PN532 utoljára olvasott tag"
@@ -75,75 +75,76 @@ pn532_spi:
   id: nfc_spi_module
   cs_pin: GPIO5
   update_interval: 100ms
-
-  # Minden sima NFC tag / telefon UID-ja ide kerül.
-  # Ez írja ki azt, amit a logban így látsz:
-  # Found new tag '04-4C-E0-22-5D-67-80'
   on_tag:
     then:
       - logger.log:
           format: "PN532 olvasott tag UID: %s"
           args: [ 'x.c_str()' ]
-
       - text_sensor.template.publish:
           id: pn532_last_tag
           state: !lambda 'return x;'
-
-      # Opcionális: Home Assistant tag_scanned eseményként is elküldi.
-      # Ezt használhatod HA automatizációkban is.
       - homeassistant.tag_scanned: !lambda 'return x;'
 
-# HomeKit alapbeállítás
-# Ezzel a kóddal tudod párosítani az Apple Home appban.
 homekit_base:
-  setup_code: "159-35-729"
+  id: homekit_bridge
+  setup_code: "159-35-728"
 
 button:
-  - platform: homekit_base
-    factory_reset:
-      name: "Reset HomeKit pairings"
+  - platform: restart
+    name: "Újraindítás"
+  - platform: homekit
+    reset_pairing_keep_homekeys:
+      name: "Reset HomeKit pairing (keep HomeKeys)"
+    factory_reset_homekeys:
+      name: "Factory reset HomeKit + HomeKeys"
 
-# HomeKey-kompatibilis HomeKit lock
-# Sikeres Apple HomeKey olvasáskor Home Assistant lock.unlock service fut.
+sensor:
+  - platform: homekit
+    homekey_homes:
+      name: "HomeKey Home-ok száma"
+    homekey_issuers:
+      name: "HomeKey kiállítók száma"
+    homekey_endpoints:
+      name: "HomeKey eszközök száma"
+
+binary_sensor:
+  - platform: homekit
+    homekey_provisioned:
+      name: "HomeKey kiosztva"
+    homekey_active_home_provisioned:
+      name: "HomeKey: párosított Home kiosztva"
+
+# Bármelyik Otthon sikeres HomeKey-e váltja a virtuális zárat.
 homekit:
   lock:
-    - id: kiskapu_homekey_lock
+    - id: homekey_lock
       nfc_id: nfc_spi_module
       on_hk_success:
-        - logger.log: "Apple HomeKey sikeres, Home Assistant lock nyitása"
-
-        # HomeKey sikeres olvasását is beírjuk ugyanabba a szenzorba
         - text_sensor.template.publish:
             id: pn532_last_tag
             state: "APPLE_HOMEKEY_SUCCESS"
+        - if:
+            condition:
+              lock.is_locked: homekey_lock
+            then:
+              - logger.log: "Apple HomeKey sikeres: virtuális zár nyitása"
+              - lock.unlock: homekey_lock
+            else:
+              - logger.log: "Apple HomeKey sikeres: virtuális zár zárása"
+              - lock.lock: homekey_lock
+      on_hk_fail:
+        - logger.log: "Apple HomeKey sikertelen"
+        - text_sensor.template.publish:
+            id: pn532_last_tag
+            state: "APPLE_HOMEKEY_FAIL"
 
-        - homeassistant.service:
-            service: lock.unlock
-            data:
-              entity_id: lock.bejarati_ajto
-
-# Ez az a zár, amit az Apple Home/HomeKey oldalon látni fogsz.
-# Ez nem a tényleges HA zár, hanem a HomeKey-hez szükséges HomeKit lock entitás.
+# A virtuális zár (Apple Otthon + Home Assistant).
 lock:
   - platform: template
-    id: kiskapu_homekey_lock
-    name: "Kiskapu HomeKey"
+    id: homekey_lock
+    name: "HomeKey zár"
     optimistic: true
-
     on_lock:
-      - logger.log: "HomeKey lock: zárás kérés"
-      - homeassistant.service:
-          service: lock.lock
-          data:
-            entity_id: lock.bejarati_ajto
-
+      - logger.log: "HomeKey zár: zárva"
     on_unlock:
-      - logger.log: "HomeKey lock: nyitás kérés"
-      - homeassistant.service:
-          service: lock.unlock
-          data:
-            entity_id: lock.bejarati_ajto
-      - delay: 2s
-      - lock.template.publish:
-          id: kiskapu_homekey_lock
-          state: LOCKED
+      - logger.log: "HomeKey zár: nyitva"

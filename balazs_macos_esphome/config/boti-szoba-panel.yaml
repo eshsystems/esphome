@@ -1,0 +1,1422 @@
+# Boti szoba fali panel – Guition ESP32-S3-4848S040 (480x480, 3 relé)
+# Oldalak: Lámpa | Zene (indítás/leállítás + 4 stílus) | Listák (MA kedvenc lejátszási listák)
+#          | Időzítő (5/10/15 perc, a végén csipog)
+#          | Játék (párkereső, Simon mondja, amőba 1/2 fő, vakondos – hanggal)
+# Gyerekzár (HA-kapcsoló): bekapcsolva csak a Lámpa és a Spot oldal érhető el.
+# Éjszakai mód (HA-kapcsoló): sötét kijelző; érintésre felkapcsol, 10 mp után újra elsötétül.
+# Webes felület: http://<panel IP-címe>/
+# Követelmény: ESPHome 2025.10+ (HA-akció válaszának fogadása a listákhoz).
+# A boti_games.h és a spot_picker.h fájlnak ezzel a YAML-lel egy mappában kell lennie.
+# A HA-ban az ESPHome integrációnál engedélyezd az eszköznek a
+# „Home Assistant akciók végrehajtása” opciót, különben a zene nem megy.
+
+substitutions:
+  name: boti-szoba-panel
+  friendly_name: Boti szoba panel
+  # Music Assistant lejátszó, amin a zene szól (MA-s media_player entitás!)
+  # Egyelőre a konyhai hangszóró; ha lesz Boti szobában lejátszó, csak ezt kell átírni
+  ma_player: media_player.konyha_hangszoro
+  # Music Assistant integráció config entry ID-ja (HA-ból kiolvasva)
+  ma_config_entry: 01JKCX1WYVC962F5123D0GSEM5
+  spot_light: light.botiszoba_spot
+  # A 4 stílusgomb: felirat + Music Assistant lejátszási lista neve vagy URI-ja
+  style1_label: Mesék        # Magyar Mesék És Hangjátékok Gyerekeknek
+  style1_media: spotify--SAqMwi7M://playlist/4GeT6cLv6gutagcMwDa4lG
+  style2_label: Gyerekdalok  # Vidám gyerekdalok
+  style2_media: spotify--SAqMwi7M://playlist/3icy9Wvqgv4fybUFU28qqC
+  style3_label: Altató       # Magyar altatók
+  style3_media: spotify--SAqMwi7M://playlist/35e5754OovKtVL787BQeHl
+  style4_label: Buli         # Bulis gyerekdalok
+  style4_media: spotify--SAqMwi7M://playlist/3z5RGCaAali30mrrraDwpY
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: 2025.10.0
+  includes:
+    - boti_games.h
+    - spot_picker.h
+  on_boot:
+    priority: -100
+    then:
+      - script.execute: apply_lock
+      - script.execute: apply_night
+      # A játékok hangjai a buzzeren
+      - lambda: |-
+          boti_games::sound = [](int count, int on_ms, int off_ms) {
+            id(beep).execute(count, on_ms, off_ms);
+          };
+
+esp32:
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+    # Csíkozódás/elcsúszó kép ellen: a kijelző képe a PSRAM-ban van, és ha a memóriabusz
+    # túl lassú vagy a flash-írás idejére letiltódik a cache, a kép egy-két kockára elcsúszik.
+    advanced:
+      # A program is a PSRAM-ból fut, így flash-írás közben sem áll le a kijelző frissítése
+      execute_from_psram: true
+    sdkconfig_options:
+      # Nagyobb adatcache és 64 bájtos cache-sor: gyorsabb PSRAM-olvasás a kijelzőnek
+      CONFIG_ESP32S3_DATA_CACHE_64KB: y
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: y
+      # A kijelző megszakítása IRAM-ból fut, flash-műveletek alatt is
+      CONFIG_LCD_RGB_ISR_IRAM_SAFE: y
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+
+api:
+  encryption:
+    key: !secret boti_panel_api_key
+
+# Bluetooth proxy: KIKAPCSOLVA. Bekapcsolva a panel leszakadt a Wi-Fi-ről, és a
+# HA-akciók (spot, listák) sem futottak le: a kijelző + BLE + Wi-Fi együtt túl sok.
+# esp32_ble_tracker:
+#   scan_parameters:
+#     active: true
+#
+# bluetooth_proxy:
+#   active: true
+
+# Böngészőből elérhető felület az IP-címen (a JS a panelről töltődik, net nélkül is megy)
+web_server:
+  port: 80
+  version: 3
+  local: true
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+    on_begin: # OTA alatt ne villogjon a kijelző
+      - light.turn_off:
+          id: display_backlight
+          transition_length: 0s
+      - lambda: "id(display_backlight).loop();"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+# ---------------------------------------------------------------- Relék
+# A lámpa helyben kapcsol: HA vagy Wi-Fi nélkül is működik.
+# GPIO40 (H1 bal 2. sor) → Sonoff T1EU relé1 vezérlőbemenete.
+output:
+  - platform: gpio
+    id: relay1_out
+    pin:
+      number: GPIO40
+      # Aktív HIGH – a panelen ellenőrizve (2026-10-25: HA „be” = a lámpa világít)
+      inverted: false
+  - platform: ledc
+    id: backlight_output
+    pin: GPIO38
+    frequency: 150Hz
+    min_power: 0.01
+    zero_means_zero: true
+
+switch:
+  # GPIO2 (H1 bal 3. sor) → Sonoff buzzer vezérlőbemenete (korábban a nem használt relay2).
+  # Egyszerű be/ki jel, aktív HIGH – a panelen ellenőrizve (2026-10-25: a „Buzzer próba”
+  # rövid csippanást ad, nyugalomban csendes). Hangfrekvencia (PWM) nem kell.
+  - platform: gpio
+    id: buzzer
+    name: Buzzer
+    icon: mdi:bullhorn
+    restore_mode: ALWAYS_OFF
+    pin:
+      number: GPIO2
+      inverted: false
+  # Gyerekzár: bekapcsolva csak a Lámpa és a Spot oldal érhető el a kijelzőn
+  - platform: template
+    id: child_lock
+    name: Gyerekzár
+    icon: mdi:lock
+    optimistic: true
+    lambda: "return id(locked);"
+    turn_on_action:
+      - globals.set: { id: locked, value: "true" }
+      - script.execute: apply_lock
+    turn_off_action:
+      - globals.set: { id: locked, value: "false" }
+      - script.execute: apply_lock
+  # Éjszakai mód: a kijelző sötét, érintésre 10 mp-re felkapcsol
+  - platform: template
+    id: night_mode
+    name: Éjszakai mód
+    icon: mdi:weather-night
+    optimistic: true
+    lambda: "return id(night);"
+    turn_on_action:
+      - globals.set: { id: night, value: "true" }
+      - script.execute: apply_night
+    turn_off_action:
+      - globals.set: { id: night, value: "false" }
+      - script.execute: apply_night
+  # Nem használt relé: kikapcsolt, belső állapotban tartjuk
+  - platform: gpio
+    id: relay3
+    internal: true
+    restore_mode: ALWAYS_OFF
+    pin:
+      number: GPIO1
+      inverted: true
+
+# Kézi működési próba HA-ból: a buzzer 300 ms-ig kap jelet. Automatikusan nem fut.
+button:
+  - platform: template
+    id: buzzer_test
+    name: Buzzer próba
+    entity_category: diagnostic
+    on_press:
+      - switch.turn_on: buzzer
+      - delay: 300ms
+      - switch.turn_off: buzzer
+
+light:
+  - platform: binary
+    id: lamp
+    name: Lámpa
+    output: relay1_out
+    # Üzembe helyezés alatt mindig kikapcsolva indul (korábban RESTORE_DEFAULT_OFF)
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - lvgl.widget.update:
+          id: lamp_btn
+          state:
+            checked: true
+    on_turn_off:
+      - lvgl.widget.update:
+          id: lamp_btn
+          state:
+            checked: false
+  - platform: monochromatic
+    id: display_backlight
+    name: Háttérvilágítás
+    output: backlight_output
+    restore_mode: ALWAYS_ON
+    default_transition_length: 1s
+
+# ---------------------------------------------------------------- Kijelző
+spi:
+  - id: lcd_spi
+    clk_pin: GPIO48
+    mosi_pin: GPIO47
+
+i2c:
+  id: touchscreen_bus
+  sda: GPIO19
+  scl:
+    number: 45
+    ignore_strapping_warning: true
+
+display:
+  - platform: st7701s
+    id: tft_display
+    dimensions:
+      width: 480
+      height: 480
+    spi_mode: MODE3
+    data_rate: 2MHz
+    color_order: RGB
+    invert_colors: false
+    cs_pin: 39
+    de_pin: 18
+    hsync_pin: 16
+    vsync_pin: 17
+    pclk_pin: 21
+    pclk_frequency: 12MHz
+    pclk_inverted: false
+    hsync_pulse_width: 8
+    hsync_front_porch: 10
+    hsync_back_porch: 20
+    vsync_pulse_width: 8
+    vsync_front_porch: 10
+    vsync_back_porch: 10
+    update_interval: never
+    auto_clear_enabled: false
+    init_sequence:
+      - 1
+      - [0xFF, 0x77, 0x01, 0x00, 0x00, 0x10] # CMD2_BKSEL_BK0
+      - [0xCD, 0x00] # MDT flag tiltása
+    data_pins:
+      red: [11, 12, 13, 14, 0]
+      green: [8, 20, 3, 46, 9, 10]
+      blue: [4, 5, 6, 7, 15]
+
+touchscreen:
+  - platform: gt911
+    id: tft_touch
+    display: tft_display
+    on_touch:
+      - light.turn_on:
+          id: display_backlight
+          brightness: 100%
+
+# Magyar ékezetek (ő, ű) miatt saját betűkészlet kell
+font:
+  - file: "gfonts://Roboto"
+    id: font_s
+    size: 20
+    glyphsets: [GF_Latin_Core]
+  - file: "gfonts://Roboto"
+    id: font_m
+    size: 26
+    glyphsets: [GF_Latin_Core]
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: bold
+    id: font_l
+    size: 34
+    glyphsets: [GF_Latin_Core]
+
+# ---------------------------------------------------------------- HA-adatok
+text_sensor:
+  - platform: homeassistant
+    id: ma_state
+    entity_id: ${ma_player}
+    on_value:
+      - lvgl.label.update:
+          id: play_icon
+          text: !lambda 'return std::string(x == "playing" ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);'
+  - platform: homeassistant
+    id: ma_title
+    entity_id: ${ma_player}
+    attribute: media_title
+    on_value:
+      - lvgl.label.update:
+          id: now_title
+          text: !lambda "return x;"
+  - platform: homeassistant
+    id: ma_artist
+    entity_id: ${ma_player}
+    attribute: media_artist
+    on_value:
+      - lvgl.label.update:
+          id: now_artist
+          text: !lambda "return x;"
+  # A spot aktuális színe, pl. "(30.0, 50.0)" – a színkör jelölőjéhez
+  - platform: homeassistant
+    id: spot_hs_state
+    entity_id: ${spot_light}
+    attribute: hs_color
+    on_value:
+      - lambda: |-
+          float h, s;
+          if (x.size() > 2 && sscanf(x.c_str() + 1, "%f, %f", &h, &s) == 2)
+            spot_picker::set_hs(h, s);
+          else
+            spot_picker::set_hs(NAN, NAN);
+
+sensor:
+  - platform: homeassistant
+    id: ma_volume
+    entity_id: ${ma_player}
+    attribute: volume_level
+    on_value:
+      - lvgl.slider.update:
+          id: vol_slider
+          # A csúszka teljes hossza 0–10% hangerő
+          value: !lambda "return std::min(x * 1000.0f, 100.0f);"
+  - platform: homeassistant
+    id: spot_brightness
+    entity_id: ${spot_light}
+    attribute: brightness
+    on_value:
+      - lvgl.slider.update:
+          id: spot_bri_slider
+          value: !lambda "return std::isnan(x) ? 1.0f : x / 2.55f;"
+
+binary_sensor:
+  - platform: homeassistant
+    id: spot_on
+    entity_id: ${spot_light}
+    on_state:
+      - lvgl.widget.update:
+          id: spot_btn
+          state:
+            checked: !lambda "return x;"
+      - lvgl.widget.update:
+          id: spot_power_btn
+          state:
+            checked: !lambda "return x;"
+      - lvgl.label.update:
+          id: spot_title
+          text: !lambda 'return std::string(x ? "Spot – Be" : "Spot – Ki");'
+
+# ---------------------------------------------------------------- Lejátszási listák
+globals:
+  - id: night
+    type: bool
+    restore_value: true
+    initial_value: "false"
+  - id: locked
+    type: bool
+    restore_value: true
+    initial_value: "false"
+  # Időzítő: hátralévő és teljes idő másodpercben (0 = nem fut)
+  - id: timer_left
+    type: int
+    initial_value: "0"
+  - id: timer_total
+    type: int
+    initial_value: "0"
+  - id: result_uris
+    type: std::vector<std::string>
+
+script:
+  # Éjszakai mód be: kijelző ki; az első érintés felkapcsolja és a gombot is megnyomja
+  # Éjszakai mód ki: kijelző teljes fényerőn
+  - id: apply_night
+    then:
+      - if:
+          condition:
+            lambda: "return id(night);"
+          then:
+            - script.execute: screen_off
+          else:
+            - light.turn_on:
+                id: display_backlight
+                brightness: 100%
+  - id: screen_off
+    then:
+      - light.turn_off:
+          id: display_backlight
+          transition_length: 500ms
+
+  # Csipogás a buzzeren: count-szor on_ms ideig szól, off_ms szünettel
+  - id: beep
+    mode: restart
+    parameters:
+      count: int
+      on_ms: int
+      off_ms: int
+    then:
+      - repeat:
+          count: !lambda "return count;"
+          then:
+            - switch.turn_on: buzzer
+            - delay: !lambda "return on_ms;"
+            - switch.turn_off: buzzer
+            - delay: !lambda "return off_ms;"
+
+  # Gyerekzár: csak a Lámpa gomb marad a navigációs sávon
+  - id: apply_lock
+    then:
+      - if:
+          condition:
+            lambda: "return id(locked);"
+          then:
+            - lvgl.widget.hide: [nav_music, nav_lists, nav_timer, nav_games]
+            - lvgl.widget.show: lock_label
+            - lvgl.page.show: page_light
+          else:
+            - lvgl.widget.show: [nav_music, nav_lists, nav_timer, nav_games]
+            - lvgl.widget.hide: lock_label
+
+  # Időzítő
+  - id: timer_start
+    mode: restart
+    parameters:
+      minutes: int
+    then:
+      - script.stop: timer_done
+      - switch.turn_off: buzzer
+      - lambda: |-
+          id(timer_total) = minutes * 60;
+          id(timer_left) = minutes * 60;
+      - lvgl.label.update:
+          id: timer_status
+          text: "Fut az időzítő"
+      - script.execute: timer_refresh
+  - id: timer_stop
+    then:
+      - script.stop: timer_done
+      - switch.turn_off: buzzer
+      - lambda: |-
+          id(timer_total) = 0;
+          id(timer_left) = 0;
+      - lvgl.label.update:
+          id: timer_status
+          text: "Válassz időt!"
+      - script.execute: timer_refresh
+  # Kijelzés: óra az oldalon, ív, és a hátralévő idő a navigációs gombon
+  - id: timer_refresh
+    then:
+      - lambda: |-
+          int left = id(timer_left);
+          int total = id(timer_total);
+          char buf[8];
+          snprintf(buf, sizeof(buf), "%02d:%02d", left / 60, left % 60);
+          lv_label_set_text(id(timer_lbl), buf);
+          lv_label_set_text(id(nav_timer_lbl), left > 0 ? buf : "Időzítő");
+          lv_arc_set_value(id(timer_arc), total > 0 ? left * 100 / total : 0);
+  # Lejárt: felkapcsolja a kijelzőt és csipog párat
+  - id: timer_done
+    mode: restart
+    then:
+      - lvgl.label.update:
+          id: timer_status
+          text: "Lejárt az idő!"
+      # Érintés nélküli ébresztés: innen indul az éjszakai 10 mp
+      - lambda: "lv_display_trigger_activity(nullptr);"
+      - light.turn_on:
+          id: display_backlight
+          brightness: 100%
+      - repeat:
+          count: 4
+          then:
+            - switch.turn_on: buzzer
+            - delay: 150ms
+            - switch.turn_off: buzzer
+            - delay: 150ms
+
+  # Színkörről választott szín
+  - id: spot_hs
+    mode: restart
+    parameters:
+      h: float
+      s: float
+    then:
+      - homeassistant.action:
+          action: light.turn_on
+          data:
+            entity_id: ${spot_light}
+          data_template:
+            hs_color: "{{ [h | float, s | float] }}"
+          variables:
+            h: !lambda "return to_string((int) h);"
+            s: !lambda "return to_string((int) s);"
+
+  # Fehér árnyalatok (Kelvin)
+  - id: spot_kelvin
+    mode: restart
+    parameters:
+      k: int
+    then:
+      - homeassistant.action:
+          action: light.turn_on
+          data:
+            entity_id: ${spot_light}
+          data_template:
+            color_temp_kelvin: "{{ k | int }}"
+          variables:
+            k: !lambda "return to_string(k);"
+
+  - id: spot_color
+    mode: restart
+    parameters:
+      r: int
+      g: int
+      b: int
+    then:
+      - homeassistant.action:
+          action: light.turn_on
+          data:
+            entity_id: ${spot_light}
+          data_template:
+            rgb_color: "{{ [r | int, g | int, b | int] }}"
+          variables:
+            r: !lambda "return to_string(r);"
+            g: !lambda "return to_string(g);"
+            b: !lambda "return to_string(b);"
+
+  - id: play_style
+    parameters:
+      media: string
+    then:
+      - homeassistant.action:
+          action: music_assistant.play_media
+          data:
+            entity_id: ${ma_player}
+            media_type: playlist
+            enqueue: replace
+          data_template:
+            media_id: "{{ media }}"
+          variables:
+            media: !lambda "return media;"
+
+  # A listák oldalon kiválasztott lejátszási lista indítása az elejéről
+  - id: play_list
+    parameters:
+      idx: int
+    then:
+      - if:
+          condition:
+            lambda: "return idx < (int) id(result_uris).size();"
+          then:
+            - homeassistant.action:
+                action: music_assistant.play_media
+                data:
+                  entity_id: ${ma_player}
+                  media_type: playlist
+                  enqueue: replace
+                data_template:
+                  media_id: "{{ uri }}"
+                variables:
+                  uri: !lambda "return id(result_uris)[idx];"
+            - lvgl.page.show: page_music
+
+  # A Music Assistantban kedvencnek jelölt lejátszási listák betöltése (max. 8)
+  - id: load_lists
+    mode: restart
+    then:
+      - lvgl.label.update:
+          id: lists_status
+          text: "Betöltés…"
+      - homeassistant.action:
+          action: music_assistant.get_library
+          data:
+            config_entry_id: ${ma_config_entry}
+            media_type: playlist
+            favorite: "true"
+            order_by: name
+            limit: "8"
+          capture_response: true
+          # A választ a HA oldalon 2 mezőre szűkítjük
+          response_template: >-
+            {% set ns = namespace(r=[]) %}
+            {% for t in response['items'][:8] %}
+            {% set ns.r = ns.r + [{'u': t.uri, 'n': t.name}] %}
+            {% endfor %}
+            {{ ns.r | to_json }}
+          on_success:
+            - lambda: |-
+                JsonDocument doc;
+                JsonArrayConst arr;
+                JsonVariantConst r = response["response"];
+                if (r.is<const char *>()) {
+                  deserializeJson(doc, r.as<const char *>());
+                  arr = doc.as<JsonArrayConst>();
+                } else {
+                  arr = r.as<JsonArrayConst>();
+                }
+                lv_obj_t *btns[8] = {id(list_btn_0), id(list_btn_1), id(list_btn_2), id(list_btn_3), id(list_btn_4), id(list_btn_5), id(list_btn_6), id(list_btn_7)};
+                lv_obj_t *lbls[8] = {id(list_lbl_0), id(list_lbl_1), id(list_lbl_2), id(list_lbl_3), id(list_lbl_4), id(list_lbl_5), id(list_lbl_6), id(list_lbl_7)};
+                id(result_uris).clear();
+                for (JsonObjectConst t : arr) {
+                  if (id(result_uris).size() >= 8) break;
+                  size_t i = id(result_uris).size();
+                  id(result_uris).push_back(t["u"].as<std::string>());
+                  lv_label_set_text(lbls[i], t["n"].as<std::string>().c_str());
+                  lv_obj_clear_flag(btns[i], LV_OBJ_FLAG_HIDDEN);
+                }
+                for (size_t i = id(result_uris).size(); i < 8; i++)
+                  lv_obj_add_flag(btns[i], LV_OBJ_FLAG_HIDDEN);
+                lv_label_set_text(id(lists_status), id(result_uris).empty()
+                    ? "Nincs kedvenc lista – jelölj meg egyet a Music Assistantban!"
+                    : "Bökj rá egy listára!");
+          on_error:
+            - lvgl.label.update:
+                id: lists_status
+                text: "Nem sikerült betölteni a listákat"
+
+interval:
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            lambda: "return id(timer_left) > 0;"
+          then:
+            - lambda: "id(timer_left)--;"
+            - script.execute: timer_refresh
+            - if:
+                condition:
+                  lambda: "return id(timer_left) == 0;"
+                then:
+                  - script.execute: timer_done
+
+# ---------------------------------------------------------------- LVGL felület
+lvgl:
+  displays: tft_display
+  touchscreens: tft_touch
+  buffer_size: 25%
+  on_idle:
+    # Éjszakai módban az utolsó érintés után 10 mp-cel elsötétül
+    - timeout: 10s
+      then:
+        - if:
+            condition:
+              lambda: "return id(night);"
+            then:
+              - script.execute: screen_off
+    # Nappal 60 mp után halványra vált
+    - timeout: 60s
+      then:
+        - if:
+            condition:
+              lambda: "return !id(night);"
+            then:
+              - light.turn_on:
+                  id: display_backlight
+                  brightness: 15%
+  theme:
+    button:
+      bg_color: 0x2A3550
+      text_color: 0xFFFFFF
+      radius: 18
+      border_width: 0
+      shadow_width: 0
+      checked:
+        bg_color: 0xF5B700
+        text_color: 0x1A1A1A
+  style_definitions:
+    - id: page_style
+      bg_color: 0x121826
+      text_color: 0xFFFFFF
+      text_font: font_m
+      pad_all: 0
+      border_width: 0
+    - id: nav_btn
+      height: 64
+      width: 96
+      radius: 0
+      bg_color: 0x1B2336
+  top_layer:
+    widgets:
+      # Alsó navigációs sáv
+      - obj:
+          align: BOTTOM_MID
+          width: 480
+          height: 64
+          pad_all: 0
+          border_width: 0
+          bg_color: 0x1B2336
+          radius: 0
+          widgets:
+            - button:
+                styles: nav_btn
+                x: 0
+                on_click:
+                  - lvgl.page.show: page_light
+                widgets:
+                  - label:
+                      align: CENTER
+                      text: "Lámpa"
+                      text_font: font_s
+            - button:
+                id: nav_music
+                styles: nav_btn
+                x: 96
+                on_click:
+                  - lvgl.page.show: page_music
+                widgets:
+                  - label:
+                      align: CENTER
+                      text: "Zene"
+                      text_font: font_s
+            - button:
+                id: nav_lists
+                styles: nav_btn
+                x: 192
+                on_click:
+                  - lvgl.page.show: page_lists
+                  - script.execute: load_lists
+                widgets:
+                  - label:
+                      align: CENTER
+                      text: "Listák"
+                      text_font: font_s
+            - button:
+                id: nav_timer
+                styles: nav_btn
+                x: 288
+                on_click:
+                  - lvgl.page.show: page_timer
+                widgets:
+                  - label:
+                      id: nav_timer_lbl
+                      align: CENTER
+                      text: "Időzítő"
+                      text_font: font_s
+            - button:
+                id: nav_games
+                styles: nav_btn
+                x: 384
+                on_click:
+                  - lvgl.page.show: page_games
+                widgets:
+                  - label:
+                      align: CENTER
+                      text: "Játék"
+                      text_font: font_s
+            # Gyerekzár alatt a többi gomb helyén ez látszik
+            - label:
+                id: lock_label
+                hidden: true
+                align: LEFT_MID
+                x: 130
+                text: "Gyerekzár bekapcsolva"
+                text_font: font_s
+                text_color: 0x8890A6
+  pages:
+    # ------------------------------------------------ 1. Lámpa
+    - id: page_light
+      styles: page_style
+      widgets:
+        - button:
+            id: lamp_btn
+            x: 30
+            y: 30
+            width: 420
+            height: 220
+            on_click:
+              - light.toggle: lamp
+            widgets:
+              - label:
+                  align: CENTER
+                  text: "Lámpa"
+                  text_font: font_l
+        - button:
+            id: spot_btn
+            x: 30
+            y: 270
+            width: 420
+            height: 120
+            # Rövid érintés: színválasztó; hosszan nyomva: be/ki (akkor nem nyílik meg)
+            on_short_click:
+              - lambda: |-
+                  spot_picker::setup(id(spot_wheel), 240,
+                      [](float h, float s) { id(spot_hs).execute(h, s); });
+              - lvgl.page.show: page_spot
+            on_long_press:
+              - homeassistant.action:
+                  action: light.toggle
+                  data:
+                    entity_id: ${spot_light}
+            widgets:
+              - label:
+                  align: CENTER
+                  y: -14
+                  text: "Spot"
+                  text_font: font_m
+              - label:
+                  align: CENTER
+                  y: 22
+                  text: "színek · hosszan nyomva be/ki"
+                  text_font: font_s
+
+    # ------------------------------------------------ 1a. Spot szín és fényerő
+    - id: page_spot
+      styles: page_style
+      scrollable: false
+      widgets:
+        - button:
+            x: 10
+            y: 8
+            width: 100
+            height: 46
+            on_click:
+              - lvgl.page.show: page_light
+            widgets:
+              - label: { align: CENTER, text: "Vissza", text_font: font_s }
+        - label:
+            id: spot_title
+            x: 115
+            y: 14
+            width: 250
+            text: "Spot"
+            text_align: CENTER
+        - button:
+            id: spot_power_btn
+            x: 370
+            y: 8
+            width: 100
+            height: 46
+            on_click:
+              - homeassistant.action:
+                  action: light.toggle
+                  data:
+                    entity_id: ${spot_light}
+            widgets:
+              - label: { align: CENTER, text: "", text_font: montserrat_28 }
+        # Színkör: a spot_picker.h rajzolja meg az első megnyitáskor
+        - canvas:
+            id: spot_wheel
+            x: 120
+            y: 62
+            width: 240
+            height: 240
+            transparent: true
+        # Gyorsgombok: 4 meleg/hideg fehér, 4 szín
+        - button: { x: 28, y: 314, width: 46, height: 46, radius: 23, bg_color: 0xF0963F, on_click: [{ script.execute: { id: spot_kelvin, k: 2200 } }] }
+        - button: { x: 82, y: 314, width: 46, height: 46, radius: 23, bg_color: 0xF3AD6C, on_click: [{ script.execute: { id: spot_kelvin, k: 2700 } }] }
+        - button: { x: 136, y: 314, width: 46, height: 46, radius: 23, bg_color: 0xF5C190, on_click: [{ script.execute: { id: spot_kelvin, k: 3500 } }] }
+        - button: { x: 190, y: 314, width: 46, height: 46, radius: 23, bg_color: 0xF7D9BE, on_click: [{ script.execute: { id: spot_kelvin, k: 4500 } }] }
+        - button: { x: 244, y: 314, width: 46, height: 46, radius: 23, bg_color: 0x86A8F7, on_click: [{ script.execute: { id: spot_color, r: 0x86, g: 0xA8, b: 0xF7 } }] }
+        - button: { x: 298, y: 314, width: 46, height: 46, radius: 23, bg_color: 0xC996F5, on_click: [{ script.execute: { id: spot_color, r: 0xC9, g: 0x96, b: 0xF5 } }] }
+        - button: { x: 352, y: 314, width: 46, height: 46, radius: 23, bg_color: 0xF2A1E8, on_click: [{ script.execute: { id: spot_color, r: 0xF2, g: 0xA1, b: 0xE8 } }] }
+        - button: { x: 406, y: 314, width: 46, height: 46, radius: 23, bg_color: 0xEE7860, on_click: [{ script.execute: { id: spot_color, r: 0xEE, g: 0x78, b: 0x60 } }] }
+        # Fényerő
+        - slider:
+            id: spot_bri_slider
+            x: 40
+            y: 378
+            width: 400
+            height: 22
+            min_value: 1
+            max_value: 100
+            on_release:
+              - homeassistant.action:
+                  action: light.turn_on
+                  data:
+                    entity_id: ${spot_light}
+                  data_template:
+                    brightness_pct: "{{ v | int }}"
+                  variables:
+                    v: !lambda "return to_string((int) x);"
+
+    # ------------------------------------------------ 2. Zene
+    - id: page_music
+      styles: page_style
+      widgets:
+        - label:
+            id: now_title
+            x: 20
+            y: 14
+            width: 440
+            text: ""
+            text_font: font_m
+            long_mode: SCROLL_CIRCULAR
+        - label:
+            id: now_artist
+            x: 20
+            y: 46
+            width: 440
+            text: ""
+            text_font: font_s
+            text_color: 0x9AA4BF
+            long_mode: DOT
+        # Indítás / szünet és leállítás
+        - button:
+            x: 20
+            y: 80
+            width: 210
+            height: 90
+            on_click:
+              - homeassistant.action:
+                  action: media_player.media_play_pause
+                  data:
+                    entity_id: ${ma_player}
+            widgets:
+              - label:
+                  id: play_icon
+                  align: CENTER
+                  text: ""
+                  text_font: montserrat_40
+        - button:
+            x: 250
+            y: 80
+            width: 210
+            height: 90
+            on_click:
+              - homeassistant.action:
+                  action: media_player.media_stop
+                  data:
+                    entity_id: ${ma_player}
+            widgets:
+              - label:
+                  align: CENTER
+                  text: ""
+                  text_font: montserrat_40
+        # 4 stílus
+        - button:
+            x: 20
+            y: 185
+            width: 210
+            height: 75
+            bg_color: 0x3FA34D
+            on_click:
+              - script.execute:
+                  id: play_style
+                  media: ${style1_media}
+            widgets:
+              - label:
+                  align: CENTER
+                  text: ${style1_label}
+        - button:
+            x: 250
+            y: 185
+            width: 210
+            height: 75
+            bg_color: 0x2D7DD2
+            on_click:
+              - script.execute:
+                  id: play_style
+                  media: ${style2_media}
+            widgets:
+              - label:
+                  align: CENTER
+                  text: ${style2_label}
+        - button:
+            x: 20
+            y: 270
+            width: 210
+            height: 75
+            bg_color: 0x7B4FB8
+            on_click:
+              - script.execute:
+                  id: play_style
+                  media: ${style3_media}
+            widgets:
+              - label:
+                  align: CENTER
+                  text: ${style3_label}
+        - button:
+            x: 250
+            y: 270
+            width: 210
+            height: 75
+            bg_color: 0xE0533D
+            on_click:
+              - script.execute:
+                  id: play_style
+                  media: ${style4_media}
+            widgets:
+              - label:
+                  align: CENTER
+                  text: ${style4_label}
+        # Hangerő: a csúszka teljes útja = 0–10% hangerő (a gyerekszobában ennyi bőven elég)
+        - slider:
+            id: vol_slider
+            x: 40
+            y: 368
+            width: 400
+            height: 24
+            min_value: 0
+            max_value: 100
+            on_release:
+              - homeassistant.action:
+                  action: media_player.volume_set
+                  data:
+                    entity_id: ${ma_player}
+                  data_template:
+                    volume_level: "{{ v | float / 1000 }}"
+                  variables:
+                    v: !lambda "return to_string((int) x);"
+
+    # ------------------------------------------------ 3. Lejátszási listák
+    # A Music Assistantban kedvencnek (szívecske) jelölt listák; bökésre az elejéről indul
+    - id: page_lists
+      styles: page_style
+      widgets:
+        - label:
+            x: 15
+            y: 14
+            text: "Lejátszási listák"
+        - button:
+            x: 345
+            y: 8
+            width: 120
+            height: 46
+            on_click:
+              - script.execute: load_lists
+            widgets:
+              - label: { align: CENTER, text: "Frissít", text_font: font_s }
+        - obj:
+            x: 0
+            y: 62
+            width: 480
+            height: 354
+            pad_all: 6
+            border_width: 0
+            bg_opa: TRANSP
+            layout:
+              type: FLEX
+              flex_flow: COLUMN
+              pad_row: 6
+            widgets:
+              - label:
+                  id: lists_status
+                  width: 460
+                  text: ""
+                  text_font: font_s
+                  text_color: 0x9AA4BF
+                  long_mode: WRAP
+              - button:
+                  id: list_btn_0
+                  width: 460
+                  height: 58
+                  hidden: true
+                  on_click:
+                    - script.execute: { id: play_list, idx: 0 }
+                  widgets:
+                    - label: { id: list_lbl_0, x: 4, align: LEFT_MID, width: 440, text: "", text_font: font_s, long_mode: DOT }
+              - button:
+                  id: list_btn_1
+                  width: 460
+                  height: 58
+                  hidden: true
+                  on_click:
+                    - script.execute: { id: play_list, idx: 1 }
+                  widgets:
+                    - label: { id: list_lbl_1, x: 4, align: LEFT_MID, width: 440, text: "", text_font: font_s, long_mode: DOT }
+              - button:
+                  id: list_btn_2
+                  width: 460
+                  height: 58
+                  hidden: true
+                  on_click:
+                    - script.execute: { id: play_list, idx: 2 }
+                  widgets:
+                    - label: { id: list_lbl_2, x: 4, align: LEFT_MID, width: 440, text: "", text_font: font_s, long_mode: DOT }
+              - button:
+                  id: list_btn_3
+                  width: 460
+                  height: 58
+                  hidden: true
+                  on_click:
+                    - script.execute: { id: play_list, idx: 3 }
+                  widgets:
+                    - label: { id: list_lbl_3, x: 4, align: LEFT_MID, width: 440, text: "", text_font: font_s, long_mode: DOT }
+              - button:
+                  id: list_btn_4
+                  width: 460
+                  height: 58
+                  hidden: true
+                  on_click:
+                    - script.execute: { id: play_list, idx: 4 }
+                  widgets:
+                    - label: { id: list_lbl_4, x: 4, align: LEFT_MID, width: 440, text: "", text_font: font_s, long_mode: DOT }
+              - button:
+                  id: list_btn_5
+                  width: 460
+                  height: 58
+                  hidden: true
+                  on_click:
+                    - script.execute: { id: play_list, idx: 5 }
+                  widgets:
+                    - label: { id: list_lbl_5, x: 4, align: LEFT_MID, width: 440, text: "", text_font: font_s, long_mode: DOT }
+              - button:
+                  id: list_btn_6
+                  width: 460
+                  height: 58
+                  hidden: true
+                  on_click:
+                    - script.execute: { id: play_list, idx: 6 }
+                  widgets:
+                    - label: { id: list_lbl_6, x: 4, align: LEFT_MID, width: 440, text: "", text_font: font_s, long_mode: DOT }
+              - button:
+                  id: list_btn_7
+                  width: 460
+                  height: 58
+                  hidden: true
+                  on_click:
+                    - script.execute: { id: play_list, idx: 7 }
+                  widgets:
+                    - label: { id: list_lbl_7, x: 4, align: LEFT_MID, width: 440, text: "", text_font: font_s, long_mode: DOT }
+
+    # ------------------------------------------------ 3a. Időzítő
+    - id: page_timer
+      styles: page_style
+      scrollable: false
+      widgets:
+        - arc:
+            id: timer_arc
+            x: 130
+            y: 14
+            width: 220
+            height: 220
+            min_value: 0
+            max_value: 100
+            value: 0
+            adjustable: false
+            arc_width: 16
+            arc_color: 0x2A3550
+            indicator:
+              arc_width: 16
+              arc_color: 0xF5B700
+            widgets:
+              - label:
+                  id: timer_lbl
+                  align: CENTER
+                  text: "00:00"
+                  text_font: font_l
+        - label:
+            id: timer_status
+            x: 0
+            y: 244
+            width: 480
+            text: "Válassz időt!"
+            text_align: CENTER
+        - button:
+            x: 20
+            y: 282
+            width: 140
+            height: 64
+            on_click:
+              - script.execute: { id: timer_start, minutes: 5 }
+            widgets:
+              - label: { align: CENTER, text: "5 perc" }
+        - button:
+            x: 170
+            y: 282
+            width: 140
+            height: 64
+            on_click:
+              - script.execute: { id: timer_start, minutes: 10 }
+            widgets:
+              - label: { align: CENTER, text: "10 perc" }
+        - button:
+            x: 320
+            y: 282
+            width: 140
+            height: 64
+            on_click:
+              - script.execute: { id: timer_start, minutes: 15 }
+            widgets:
+              - label: { align: CENTER, text: "15 perc" }
+        - button:
+            x: 140
+            y: 356
+            width: 200
+            height: 50
+            bg_color: 0x5A2A35
+            on_click:
+              - script.execute: timer_stop
+            widgets:
+              - label: { align: CENTER, text: "Leállítás", text_font: font_s }
+
+    # ------------------------------------------------ 4. Játékválasztó
+    # A játékokat az első megnyitáskor hozza létre a boti_games.h
+    - id: page_games
+      styles: page_style
+      scrollable: false
+      widgets:
+        - button:
+            x: 20
+            y: 20
+            width: 210
+            height: 185
+            bg_color: 0xE0533D
+            on_click:
+              - lambda: "boti_games::memory::setup(id(mem_area), id(mem_status));"
+              - lvgl.page.show: page_memory
+            widgets:
+              - label: { align: CENTER, y: -22, text: "", text_font: montserrat_48 }
+              - label: { align: CENTER, y: 45, text: "Párkereső" }
+        - button:
+            x: 250
+            y: 20
+            width: 210
+            height: 185
+            bg_color: 0x2D7DD2
+            on_click:
+              - lambda: "boti_games::simon::setup(id(simon_area), id(simon_status));"
+              - lvgl.page.show: page_simon
+            widgets:
+              - label: { align: CENTER, y: -22, text: "", text_font: montserrat_48 }
+              - label: { align: CENTER, y: 45, text: "Simon mondja" }
+        - button:
+            x: 20
+            y: 220
+            width: 210
+            height: 185
+            bg_color: 0x3FA34D
+            on_click:
+              - lambda: "boti_games::tictactoe::setup(id(ttt_area), id(ttt_status), id(ttt_mode_lbl));"
+              - lvgl.page.show: page_ttt
+            widgets:
+              - label: { align: CENTER, y: -22, text: "", text_font: montserrat_48 }
+              - label: { align: CENTER, y: 45, text: "Amőba" }
+        - button:
+            x: 250
+            y: 220
+            width: 210
+            height: 185
+            bg_color: 0x9C6B3C
+            on_click:
+              - lambda: "boti_games::mole::setup(id(mole_area), id(mole_status));"
+              - lambda: "boti_games::mole::new_game();"
+              - lvgl.page.show: page_mole
+            widgets:
+              - label: { align: CENTER, y: -22, text: "\uF06E", text_font: montserrat_48 }
+              - label: { align: CENTER, y: 45, text: "Vakondos" }
+
+    # ------------------------------------------------ 4a. Párkereső
+    - id: page_memory
+      styles: page_style
+      scrollable: false
+      widgets:
+        - button:
+            x: 10
+            y: 8
+            width: 100
+            height: 46
+            on_click:
+              - lvgl.page.show: page_games
+            widgets:
+              - label: { align: CENTER, text: "Vissza", text_font: font_s }
+        - label:
+            id: mem_status
+            x: 115
+            y: 4
+            width: 250
+            height: 56
+            text: ""
+            text_font: font_s
+            text_align: CENTER
+            long_mode: WRAP
+        - button:
+            x: 370
+            y: 8
+            width: 100
+            height: 46
+            on_click:
+              - lambda: "boti_games::memory::new_game();"
+            widgets:
+              - label: { align: CENTER, text: "Újra", text_font: font_s }
+        - obj:
+            id: mem_area
+            x: 0
+            y: 60
+            width: 480
+            height: 356
+            bg_opa: TRANSP
+            border_width: 0
+            scrollable: false
+
+    # ------------------------------------------------ 4b. Simon mondja
+    - id: page_simon
+      styles: page_style
+      scrollable: false
+      widgets:
+        - button:
+            x: 10
+            y: 8
+            width: 100
+            height: 46
+            on_click:
+              - lvgl.page.show: page_games
+            widgets:
+              - label: { align: CENTER, text: "Vissza", text_font: font_s }
+        - label:
+            id: simon_status
+            x: 115
+            y: 4
+            width: 250
+            height: 56
+            text: ""
+            text_font: font_s
+            text_align: CENTER
+            long_mode: WRAP
+        - button:
+            x: 370
+            y: 8
+            width: 100
+            height: 46
+            on_click:
+              - lambda: "boti_games::simon::new_game();"
+            widgets:
+              - label: { align: CENTER, text: "Újra", text_font: font_s }
+        - obj:
+            id: simon_area
+            x: 0
+            y: 60
+            width: 480
+            height: 356
+            bg_opa: TRANSP
+            border_width: 0
+            scrollable: false
+
+    # ------------------------------------------------ 4c. Amőba
+    - id: page_ttt
+      styles: page_style
+      scrollable: false
+      widgets:
+        - button:
+            x: 10
+            y: 8
+            width: 100
+            height: 46
+            on_click:
+              - lvgl.page.show: page_games
+            widgets:
+              - label: { align: CENTER, text: "Vissza", text_font: font_s }
+        - label:
+            id: ttt_status
+            x: 115
+            y: 4
+            width: 170
+            height: 56
+            text: ""
+            text_font: font_s
+            text_align: CENTER
+            long_mode: WRAP
+        - button:
+            x: 370
+            y: 8
+            width: 100
+            height: 46
+            on_click:
+              - lambda: "boti_games::tictactoe::new_game();"
+            widgets:
+              - label: { align: CENTER, text: "Újra", text_font: font_s }
+        # Egy játékos (gép ellen) / két játékos
+        - button:
+            x: 290
+            y: 8
+            width: 75
+            height: 46
+            on_click:
+              - lambda: "boti_games::tictactoe::toggle_mode();"
+            widgets:
+              - label: { id: ttt_mode_lbl, align: CENTER, text: "1 fő", text_font: font_s }
+        - obj:
+            id: ttt_area
+            x: 0
+            y: 60
+            width: 480
+            height: 356
+            bg_opa: TRANSP
+            border_width: 0
+            scrollable: false
+
+    # ------------------------------------------------ 4d. Vakondos
+    # Bökj a felbukkanó vakondra! Olvasni nem kell hozzá.
+    - id: page_mole
+      styles: page_style
+      scrollable: false
+      widgets:
+        - button:
+            x: 10
+            y: 8
+            width: 100
+            height: 46
+            on_click:
+              - lvgl.page.show: page_games
+            widgets:
+              - label: { align: CENTER, text: "Vissza", text_font: font_s }
+        - label:
+            id: mole_status
+            x: 115
+            y: 4
+            width: 250
+            height: 56
+            text: ""
+            text_font: font_m
+            text_align: CENTER
+            long_mode: WRAP
+        - button:
+            x: 370
+            y: 8
+            width: 100
+            height: 46
+            on_click:
+              - lambda: "boti_games::mole::new_game();"
+            widgets:
+              - label: { align: CENTER, text: "Újra", text_font: font_s }
+        - obj:
+            id: mole_area
+            x: 0
+            y: 60
+            width: 480
+            height: 356
+            bg_opa: TRANSP
+            border_width: 0
+            scrollable: false

@@ -1,0 +1,270 @@
+substitutions:
+  device_name: nagykapu_nyito
+  friendly_name: Nagykapu nyitó
+  # Az impulzus hossza - itt tudod állítani egy helyen
+  pulse_length: 500ms
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+api:
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid_udvar
+  password: !secret wifi_password
+  manual_ip:
+    static_ip: 192.168.22.85
+    gateway: 192.168.22.1
+    subnet: 255.255.255.0
+  ap:
+    ssid: "nagykapu_nyito"
+    password: "12345678"
+
+captive_portal:
+web_server:
+
+# ---------------------------------------------------------------
+# Relé kimenet - GPIO23
+# Ha aktív MAGAS a relémodulod, vedd ki az "inverted: true" sort.
+# ---------------------------------------------------------------
+output:
+  - platform: gpio
+    id: relay_output
+    pin:
+      number: GPIO23
+      inverted: true
+
+script:
+  # Egyetlen impulzus a panel léptető bemenetére (LO)
+  - id: relay_pulse
+    mode: single
+    then:
+      - output.turn_on: relay_output
+      - delay: ${pulse_length}
+      - output.turn_off: relay_output
+
+  # -------------------------------------------------------------
+  # A panel P7=01 (léptető) módban ciklikusan vált:
+  # nyit -> stop -> zár -> stop -> nyit ...
+  # A következő impulzus mindig az utolsó mozgás ellenkezője.
+  # Ha a kért irány nem egyezik a ciklus következő lépésével,
+  # három impulzus kell: rossz irány -> stop -> jó irány.
+  # -------------------------------------------------------------
+  - id: cmd_open
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(last_motion) == 2 || (id(last_motion) == 0 && id(s_y).state);'
+          then:
+            - script.execute: relay_pulse
+          else:
+            - script.execute: relay_pulse
+            - wait_until:
+                condition:
+                  binary_sensor.is_on: s_r
+                timeout: 3s
+            - delay: 800ms
+            - script.execute: relay_pulse
+            - delay: 800ms
+            - script.execute: relay_pulse
+
+  - id: cmd_close
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(last_motion) == 1;'
+          then:
+            - script.execute: relay_pulse
+          else:
+            - script.execute: relay_pulse
+            - wait_until:
+                condition:
+                  binary_sensor.is_on: s_g
+                timeout: 3s
+            - delay: 800ms
+            - script.execute: relay_pulse
+            - delay: 800ms
+            - script.execute: relay_pulse
+
+# ---------------------------------------------------------------
+# Utolsó mozgásirány - a ciklus követéséhez és a "megállítva"
+# állapot felismeréséhez
+# 0 = nincs adat, 1 = nyitás, 2 = zárás
+# ---------------------------------------------------------------
+globals:
+  - id: last_motion
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+# ---------------------------------------------------------------
+# Nyomógomb engedélyezése - ha ki van kapcsolva, a GPIO13-as
+# gomb nem működteti a kaput (a HA-ból küldött parancsok igen)
+# ---------------------------------------------------------------
+switch:
+  - platform: template
+    id: button_enabled
+    name: "Nyomógomb engedélyezve"
+    icon: "mdi:gesture-tap-button"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+# ---------------------------------------------------------------
+# CN5 állapotjelek - open collector, aktív = GND-re húz
+# ---------------------------------------------------------------
+binary_sensor:
+  - platform: gpio
+    id: s_y
+    name: "Jel Y (zárva)"
+    entity_category: diagnostic
+    pin:
+      number: GPIO32
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+
+  - platform: gpio
+    id: s_r
+    name: "Jel R (záródik)"
+    entity_category: diagnostic
+    pin:
+      number: GPIO33
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      - lambda: 'id(last_motion) = 2;'
+
+  - platform: gpio
+    id: s_g
+    name: "Jel G (nyílik)"
+    entity_category: diagnostic
+    pin:
+      number: GPIO25
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      - lambda: 'id(last_motion) = 1;'
+
+  - platform: gpio
+    id: s_b
+    name: "Jel B (részlegesen nyitva)"
+    entity_category: diagnostic
+    pin:
+      number: GPIO26
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+
+  # -------------------------------------------------------------
+  # Külső nyomógomb - GPIO13, GND-re húz megnyomáskor
+  # Egyszerű léptetés, ugyanaz mint a panel saját gombja
+  # -------------------------------------------------------------
+  - platform: gpio
+    id: push_button
+    name: "Nyomógomb"
+    pin:
+      number: GPIO13
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      - if:
+          condition:
+            switch.is_on: button_enabled
+          then:
+            - script.execute: relay_pulse
+
+# ---------------------------------------------------------------
+# Kapu entitás - a nyitás/zárás követi a panel ciklusát,
+# a stop mindig egyetlen impulzus
+# ---------------------------------------------------------------
+cover:
+  - platform: template
+    id: kapu
+    name: None
+    device_class: gate
+    optimistic: false
+    open_action:
+      - script.execute: cmd_open
+    close_action:
+      - script.execute: cmd_close
+    stop_action:
+      - script.execute: relay_pulse
+
+# ---------------------------------------------------------------
+# Állapot kiértékelés - csak változáskor publikál
+# Zárás közbeni megállításnál félig nyitott pozíció, hogy a HA
+# mindkét gombot engedélyezze
+# ---------------------------------------------------------------
+interval:
+  - interval: 200ms
+    then:
+      - lambda: |-
+          auto op = COVER_OPERATION_IDLE;
+          float pos = COVER_OPEN;
+          if (id(s_g).state) {
+            op = COVER_OPERATION_OPENING;
+          } else if (id(s_r).state) {
+            op = COVER_OPERATION_CLOSING;
+          } else if (id(s_y).state) {
+            pos = COVER_CLOSED;
+          } else if (id(last_motion) == 2) {
+            pos = 0.5f;
+          }
+          if (op != id(kapu).current_operation || pos != id(kapu).position) {
+            id(kapu).current_operation = op;
+            id(kapu).position = pos;
+            id(kapu).publish_state(false);
+          }
+
+text_sensor:
+  - platform: template
+    name: "Kapu állapot"
+    icon: "mdi:gate"
+    update_interval: 500ms
+    lambda: |-
+      if (id(s_g).state) return {"Nyílik"};
+      if (id(s_r).state) return {"Záródik"};
+      if (id(s_y).state) return {"Zárva"};
+      if (id(s_b).state) return {"Részlegesen nyitva"};
+      if (id(last_motion) == 2) return {"Megállítva"};
+      return {"Nyitva"};
+
+esp32_ble_tracker:
+  scan_parameters:
+    active: true
+
+bluetooth_proxy:

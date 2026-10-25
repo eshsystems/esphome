@@ -1,15 +1,30 @@
-# Board: ESP-12F_Relay_X8
-# Definition: definitions/boards/esp_12f_relay_x8/manifest.yaml
+# Board: ESP32E Relay X8 (ESP32-WROOM-32E)
+# https://devices.esphome.io/devices/esp32e-relay-x8/
+#
+# LED-szalag: arduino + neopixelbus (I2S DMA).
+# Oka: a klasszikus ESP32 RMT perifériája max 512 szimbólum, 60 RGBW LED-hez
+# 1920 kell. A megszakításos utántöltés ezen a hardveren Interrupt WDT-t okoz.
+# Az I2S metódus DMA-val dolgozik, nincs ISR-es utántöltés.
 
 esphome:
   name: kiskapu_vezerlo
+  friendly_name: Kiskapu vezérlő
+  # A zár optimistic módban van, indulás után nincs ismert állapota.
+  # A relé ALWAYS_OFF, tehát fizikailag zárva van - ezt publikáljuk.
+  on_boot:
+    priority: -100
+    then:
+      - lock.template.publish:
+          id: kiskapu_zar
+          state: LOCKED
 
 esp32:
-  variant: esp32
+  board: esp32dev
   framework:
-    type: esp-idf
+    type: arduino
 
 logger:
+  level: DEBUG
 
 api:
   encryption:
@@ -35,70 +50,126 @@ captive_portal:
 web_server:
   port: 80
 
-# Status LED
 status_led:
   pin:
-    number: 23
+    number: GPIO23
 
-# LED-szalag tápja a 2-es relén keresztül.
-# Fontos: a GPIO33 már nem szerepel külön switch-ként,
-# mert ezt a power_supply komponens kezeli.
+# Relay 2 (GPIO33) a LED-szalag tápja.
+# A power_supply garantálja a sorrendet: előbb relé, 300 ms várakozás,
+# és csak utána indul a LED-adat. Triggerrel ez nem lenne garantált,
+# mert az aszinkron fut.
 power_supply:
   - id: ledszalag_tap_rele
     pin: GPIO33
     enable_time: 300ms
     keep_on_time: 0s
 
-
 output:
+  # Relay 1 - kerti lámpák
   - platform: gpio
     pin: GPIO32
     id: relay1_output
 
+number:
+  - platform: template
+    name: "Mágneszár nyitási idő"
+    id: magneszar_ido
+    icon: "mdi:timer-outline"
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_value: 5
+    min_value: 5
+    max_value: 60
+    step: 1
+    unit_of_measurement: "s"
+    mode: box
 
+# A visszazárást végző script. mode: restart -> ismételt nyitás
+# újraindítja a visszaszámlálást, nem fut két példány egyszerre.
+script:
+  - id: magneszar_auto_zaras
+    mode: restart
+    then:
+      - delay: !lambda 'return (uint32_t)(id(magneszar_ido).state * 1000);'
+      - switch.turn_off: relay3
+      - lock.template.publish:
+          id: kiskapu_zar
+          state: LOCKED
 
-    
+lock:
+  - platform: template
+    name: "Kiskapu mágneszár"
+    id: kiskapu_zar
+    optimistic: true
+    lock_action:
+      # Kézi zárás: a függőben lévő auto-zárást is eldobjuk,
+      # különben később feleslegesen belelőne.
+      - script.stop: magneszar_auto_zaras
+      - switch.turn_off: relay3
+    unlock_action:
+      - switch.turn_on: relay3
+      - if:
+          condition:
+            switch.is_on: auto_visszazaras
+          then:
+            - script.execute: magneszar_auto_zaras
 
-    
-# Relay outputs exposed as switches in Home Assistant
-# Relay2 szándékosan nincs itt, mert a LED-szalag tápját kapcsolja.
 switch:
-#  - platform: gpio
-#    pin: GPIO32
-#    name: Relay1
-#    id: relay1
+  # Relay 2 szándékosan nincs itt: a power_supply kezeli.
 
+  # Relay 3 - mágneszár, csak a lock entitás használja
   - platform: gpio
     pin: GPIO25
-    name: Relay3
     id: relay3
+    internal: true
+    restore_mode: ALWAYS_OFF
 
+  # Relay 4
   - platform: gpio
     pin: GPIO26
     name: Relay4
     id: relay4
 
+  # Relay 5
   - platform: gpio
     pin: GPIO27
     name: Relay5
     id: relay5
 
+  # Relay 6
   - platform: gpio
     pin: GPIO14
     name: Relay6
     id: relay6
 
-  - platform: gpio
-    pin:
-      number: 12
-      ignore_strapping_warning: true
-    name: Relay7
-    id: relay7
+  # Relay 7 - GPIO12 strapping láb (MTDI). Csak indokolt esetben.
+  # - platform: gpio
+  #   pin:
+  #     number: GPIO12
+  #     ignore_strapping_warning: true
+  #   name: Relay7
+  #   id: relay7
 
+  # Relay 8
   - platform: gpio
     pin: GPIO13
     name: Relay8
     id: relay8
+
+  # Automatikus visszazárás kapcsolója. Kikapcsolva a zár nyitva marad,
+  # amíg kézzel vissza nem zárod.
+  - platform: template
+    name: "Automatikus visszazárás"
+    id: auto_visszazaras
+    icon: "mdi:lock-clock"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    # Ha nyitott zárnál kapcsolod ki, a folyamatban lévő
+    # visszaszámlálás is álljon le.
+    on_turn_off:
+      - script.stop: magneszar_auto_zaras
 
   - platform: restart
     name: "kiskapu_vezerlo Restart"
@@ -109,37 +180,24 @@ light:
     id: relay1
     output: relay1_output
     restore_mode: RESTORE_DEFAULT_OFF
-  
-  - platform: esp32_rmt_led_strip
+
+  - platform: neopixelbus
     id: kiskapu_ledszalag
     name: "Kiskapu LEDszalag"
     pin: GPIO4
-    # FONTOS:
-    # 60 LED/m szalag esetén ezt a tényleges hossz alapján állítsd.
-    # Ha 1 méter, akkor első próbára 60.
-    # Ha azt tapasztalod, hogy csak minden 3. LED/pixel vezérelhető külön,
-    # akkor WS2814 csoportvezérelt, és 1 méternél lehet, hogy 20-at kell megadni.
     num_leds: 60
-    # WS2814 / SK6812 jellegű RGBW szalaghoz.
-    chipset: SK6812
-    rgb_order: RGB
-    # A korábbi configodban ez szerepelt, ezért meghagytam.
-    # Ha a fehér csatorna vagy a színek furcsák, próbáld meg helyette:
-    # is_rgbw: true
-    is_wrgb: true
-    # Relay2 / GPIO33 automatikus tápvezérlése:
-    # LED ON előtt relé bekapcsol, majd 300 ms után indul a LED adat.
-    # LED OFF után relé lekapcsol.
+    type: GRBW
+    variant: SK6812
+    method:
+      type: esp32_i2s
+      bus: 0
     power_supply: ledszalag_tap_rele
-    restore_mode: RESTORE_DEFAULT_OFF
-    default_transition_length: 0.5s
-    max_refresh_rate: 16ms
+    restore_mode: ALWAYS_OFF
+    # A lag ellen: átmenet és gamma-korrekció kikapcsolva.
+    # Ha nincs több akadozás, a 0.5s átmenet visszatehető.
+    default_transition_length: 0s
+    gamma_correct: 1.0
 
-
-
-
-
-    
     effects:
       - addressable_rainbow:
           name: "WLED - Rainbow"
@@ -174,29 +232,29 @@ light:
 
       - addressable_scan:
           name: "WLED - Scanner"
-          move_interval: 30ms
+          move_interval: 40ms
           scan_width: 4
 
       - addressable_twinkle:
           name: "WLED - Twinkle"
           twinkle_probability: 5%
-          progress_interval: 16ms
+          progress_interval: 40ms
 
       - addressable_random_twinkle:
           name: "WLED - Random Twinkle"
           twinkle_probability: 5%
-          progress_interval: 32ms
+          progress_interval: 40ms
 
       - addressable_fireworks:
           name: "WLED - Fireworks"
-          update_interval: 32ms
+          update_interval: 40ms
           spark_probability: 10%
           use_random_color: true
           fade_out_rate: 120
 
       - addressable_lambda:
           name: "WLED - Rainbow Chase"
-          update_interval: 20ms
+          update_interval: 40ms
           lambda: |-
             static uint16_t offset = 0;
 
@@ -225,30 +283,30 @@ light:
               it[i] = wheel(color_index);
             }
 
-            offset++;
+            offset += 2;
 
       - addressable_lambda:
           name: "WLED - White Breathe"
-          update_interval: 30ms
+          update_interval: 40ms
           lambda: |-
             static uint8_t level = 10;
-            static int dir = 5;
+            static int dir = 6;
 
             if (initial_run) {
               level = 10;
-              dir = 5;
+              dir = 6;
             }
 
             level += dir;
 
             if (level >= 250) {
               level = 250;
-              dir = -5;
+              dir = -6;
             }
 
             if (level <= 10) {
               level = 10;
-              dir = 5;
+              dir = 6;
             }
 
             for (int i = 0; i < it.size(); i++) {
@@ -257,7 +315,7 @@ light:
 
       - addressable_lambda:
           name: "WLED - Meteor"
-          update_interval: 25ms
+          update_interval: 40ms
           lambda: |-
             static int pos = 0;
 
@@ -325,7 +383,7 @@ light:
 
       - addressable_lambda:
           name: "WLED - Warm Sparkle"
-          update_interval: 40ms
+          update_interval: 50ms
           lambda: |-
             it.all().fade_to_black(45);
 
@@ -337,7 +395,7 @@ light:
 
       - addressable_lambda:
           name: "WLED - Running Red"
-          update_interval: 35ms
+          update_interval: 40ms
           lambda: |-
             static int pos = 0;
 
@@ -357,7 +415,7 @@ light:
 
       - addressable_lambda:
           name: "WLED - Soft RGB Fade"
-          update_interval: 40ms
+          update_interval: 50ms
           lambda: |-
             static uint8_t hue = 0;
 
@@ -399,7 +457,7 @@ binary_sensor:
       mode:
         input: true
         pullup: true
-      inverted: true
+      inverted: false
     filters:
       - delayed_on: 50ms
       - delayed_off: 50ms
@@ -415,6 +473,7 @@ binary_sensor:
       inverted: true
     filters:
       - delayed_on_off: 50ms
+    # Kapcsolja a szalagot: gombnyomásra be, újabb nyomásra ki.
     on_press:
       then:
-        - light.turn_on: kiskapu_ledszalag
+        - light.toggle: kiskapu_ledszalag
